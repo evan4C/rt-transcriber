@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+cpal = "0.17"
+ctrlc = "3"
+same-file = "1"
+webrtc-vad = "0.4"
+whisper-rs = "0.16"

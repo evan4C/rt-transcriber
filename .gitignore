@@ -29,3 +29,6 @@ rustc-ice-*.txt
 /target
 
 .DS_Store
+
+/models/
+/transcript.log
