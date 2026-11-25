@@ -1,0 +1,37 @@
+flowchart LR
+    mic["系统默认麦克风"]
+    model["本地多语言 Whisper GGML 模型"]
+    args["CLI 参数与 Ctrl+C"]
+
+    subgraph capture["音频回调 · audio.rs"]
+        input["CPAL 采集"]
+        pcm["混合为单声道并重采样<br/>16 kHz · 16 位 PCM · 20 ms 每帧"]
+        input --> pcm
+    end
+
+    queue["有界队列<br/>500 帧，约 10 秒"]
+
+    subgraph processing["主循环 · main.rs 与 speech.rs"]
+        control["会话控制<br/>持续监听、无词超时、退出时处理缓冲"]
+        vad["WebRTC VAD 语音检测与分段"]
+        decode["Whisper 本地解码<br/>语言选择、贪心解码或束搜索"]
+        output["整理文本并过滤空白或纯符号"]
+        vad -->|语音段| decode
+        decode --> output
+        control -.->|超时或中断时处理待转写语音| vad
+        output -.->|输出有效文本后重置计时| control
+    end
+
+    terminal["终端标准输出"]
+    log["UTF-8 日志文件"]
+
+    mic --> input
+    pcm --> queue
+    queue --> vad
+    queue -.->|采集错误或缓冲溢出| control
+    model --> decode
+    args -.-> control
+    args -.-> vad
+    args -.-> decode
+    output --> log
+    output --> terminal
