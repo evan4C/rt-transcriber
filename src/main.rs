@@ -144,11 +144,7 @@ fn main() -> Result<()> {
     };
     let mut last_words = Instant::now();
 
-    while !stopped.load(Ordering::Relaxed) {
-        ensure!(
-            !overflowed.load(Ordering::Relaxed),
-            "Transcription could not keep up with the microphone"
-        );
+    while !stopped.load(Ordering::Relaxed) && !overflowed.load(Ordering::Relaxed) {
         let wait = timeout.map_or(POLL_INTERVAL, |limit| {
             POLL_INTERVAL.min(limit.saturating_sub(last_words.elapsed()))
         });
@@ -170,6 +166,9 @@ fn main() -> Result<()> {
                         last_words = Instant::now();
                         continue;
                     }
+                    if overflowed.load(Ordering::Relaxed) || stopped.load(Ordering::Relaxed) {
+                        break;
+                    }
                     eprintln!(
                         "Stopped after {} seconds without recognized words.",
                         args.timeout
@@ -182,6 +181,9 @@ fn main() -> Result<()> {
     }
 
     drop(stream);
+    if overflowed.load(Ordering::Relaxed) {
+        eprintln!("The microphone buffer filled. Finishing buffered audio before exit.");
+    }
     for frame in frames.try_iter() {
         if let Some(samples) = segmenter.push(frame?)? {
             transcribe(&samples)?;
@@ -192,7 +194,7 @@ fn main() -> Result<()> {
     }
     ensure!(
         !overflowed.load(Ordering::Relaxed),
-        "Transcription could not keep up with the microphone"
+        "Transcription could not keep up with the microphone. Try --beam-size 1 or a lighter model."
     );
 
     Ok(())

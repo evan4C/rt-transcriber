@@ -37,6 +37,14 @@ cargo run --release -- \
 
 完整模型约 1.5 GiB。若解码跟不上采集速度，可以试用约 547 MiB 的量化模型 `ggml-large-v3-turbo-q5_0.bin`，下载后将 `--model` 改为对应路径。 [whisper.cpp 模型列表](https://huggingface.co/ggerganov/whisper.cpp)
 
+Apple Silicon Mac 可在本机终端启用 Metal，让 GPU 加速解码。
+
+```sh
+cargo run --release --features metal -- \
+  --model models/ggml-large-v3-turbo.bin \
+  --language zh --max-segment-seconds 8 --beam-size 1
+```
+
 ## 参数与运行模式
 
 | 参数 | 默认值 | 用途 |

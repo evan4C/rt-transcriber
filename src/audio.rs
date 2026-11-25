@@ -79,6 +79,10 @@ where
     device.build_input_stream(
         config,
         move |samples: &[T], _| {
+            if audio_overflow.load(Ordering::Relaxed) {
+                return;
+            }
+            let mut dropped_frame = false;
             for channels in samples.chunks_exact(channels) {
                 let mono = channels
                     .iter()
@@ -86,15 +90,22 @@ where
                     .sum::<f32>()
                     / channels.len() as f32;
                 resampler.push(mono, |sample| {
+                    if dropped_frame {
+                        return;
+                    }
                     frame[position] = sample.clamp(-1.0, 1.0).to_sample::<i16>();
                     position += 1;
                     if position == FRAME_SAMPLES {
                         if let Err(TrySendError::Full(_)) = sender.try_send(Ok(frame)) {
-                            audio_overflow.store(true, Ordering::Relaxed);
+                            dropped_frame = true;
                         }
                         position = 0;
                     }
                 });
+                if dropped_frame {
+                    audio_overflow.store(true, Ordering::Relaxed);
+                    break;
+                }
             }
         },
         move |error| {

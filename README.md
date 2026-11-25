@@ -19,6 +19,16 @@ cargo build --release
 
 Allow microphone access if the operating system prompts for it. Use `--model PATH` to select another multilingual Whisper GGML model. If decoding falls behind on your machine, try the multilingual `ggml-tiny.bin` model.
 
+On an Apple Silicon Mac, enable Metal acceleration for larger models from a local terminal:
+
+```sh
+cargo run --release --features metal -- \
+  --model models/ggml-large-v3-turbo.bin \
+  --language zh --max-segment-seconds 8 --beam-size 1
+```
+
+If the microphone buffer fills, the CLI stops accepting new audio and processes the queued audio before reporting the error. Greedy decoding (`--beam-size 1`) or a lighter model can help keep up with capture.
+
 ## Usage
 
 ```sh
