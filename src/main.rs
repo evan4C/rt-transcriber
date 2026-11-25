@@ -42,6 +42,14 @@ struct Args {
     #[arg(long, value_enum, default_value = "auto")]
     language: Language,
 
+    /// Force a split after this many seconds of continuous speech.
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=20))]
+    max_segment_seconds: u8,
+
+    /// Number of decoding candidates to consider (1 uses greedy decoding).
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(i32).range(1..=8))]
+    beam_size: i32,
+
     /// Listen until interrupted, or stop after a period without recognized words.
     #[arg(long, value_enum, default_value = "forever")]
     duration: RunDuration,
@@ -86,7 +94,8 @@ fn main() -> Result<()> {
         "Whisper model not found at {}. Download a multilingual GGML model and pass its path with --model.",
         args.model.display()
     );
-    let mut recognizer = Recognizer::open(&args.model, args.language.whisper_code())?;
+    let mut recognizer =
+        Recognizer::open(&args.model, args.language.whisper_code(), args.beam_size)?;
     if stopped.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -128,7 +137,7 @@ fn main() -> Result<()> {
         overflowed,
     } = Microphone::open()?;
     eprintln!("Listening on the default microphone. Press Ctrl+C to stop.");
-    let mut segmenter = Segmenter::new();
+    let mut segmenter = Segmenter::new(args.max_segment_seconds);
     let timeout = match args.duration {
         RunDuration::Forever => None,
         RunDuration::Auto => Some(Duration::from_secs(args.timeout.get())),

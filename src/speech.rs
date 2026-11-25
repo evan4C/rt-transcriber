@@ -6,29 +6,35 @@ use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
 };
 
-use crate::audio::{FRAME_SAMPLES, Frame};
+use crate::audio::{Frame, SAMPLE_RATE};
 
 const PRE_ROLL_FRAMES: usize = 10;
 const START_VOICE_FRAMES: usize = 3;
 const END_SILENCE_FRAMES: usize = 20;
-const MAX_SEGMENT_FRAMES: usize = 200;
+// Require 200 ms of VAD-positive audio before decoding. A short impulse can
+// trigger several positive frames because WebRTC VAD briefly holds its decision.
+const MIN_VOICED_FRAMES: usize = 10;
 
 pub struct Segmenter {
     vad: Vad,
     pre_roll: VecDeque<Frame>,
     segment: Vec<f32>,
+    max_segment_samples: usize,
     consecutive_voice: usize,
     consecutive_silence: usize,
+    voiced_frames: usize,
 }
 
 impl Segmenter {
-    pub fn new() -> Self {
+    pub fn new(max_segment_seconds: u8) -> Self {
         Self {
             vad: Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive),
             pre_roll: VecDeque::with_capacity(PRE_ROLL_FRAMES),
             segment: Vec::new(),
+            max_segment_samples: usize::from(max_segment_seconds) * SAMPLE_RATE as usize,
             consecutive_voice: 0,
             consecutive_silence: 0,
+            voiced_frames: 0,
         }
     }
 
@@ -52,7 +58,8 @@ impl Segmenter {
             };
 
             if self.consecutive_voice == START_VOICE_FRAMES {
-                self.segment.reserve(MAX_SEGMENT_FRAMES * FRAME_SAMPLES);
+                self.voiced_frames = self.consecutive_voice;
+                self.segment.reserve(self.max_segment_samples);
                 for frame in self.pre_roll.drain(..) {
                     append_frame(&mut self.segment, frame);
                 }
@@ -61,13 +68,14 @@ impl Segmenter {
         }
 
         append_frame(&mut self.segment, frame);
+        self.voiced_frames += usize::from(voiced);
         self.consecutive_silence = if voiced {
             0
         } else {
             self.consecutive_silence + 1
         };
         if self.consecutive_silence == END_SILENCE_FRAMES
-            || self.segment.len() >= MAX_SEGMENT_FRAMES * FRAME_SAMPLES
+            || self.segment.len() >= self.max_segment_samples
         {
             return self.finish();
         }
@@ -78,7 +86,11 @@ impl Segmenter {
         self.pre_roll.clear();
         self.consecutive_voice = 0;
         self.consecutive_silence = 0;
-        (!self.segment.is_empty()).then(|| mem::take(&mut self.segment))
+        if mem::take(&mut self.voiced_frames) < MIN_VOICED_FRAMES {
+            self.segment.clear();
+            return None;
+        }
+        Some(mem::take(&mut self.segment))
     }
 }
 
@@ -92,7 +104,7 @@ pub struct Recognizer {
 }
 
 impl Recognizer {
-    pub fn open(model: &Path, language: Option<&'static str>) -> Result<Self> {
+    pub fn open(model: &Path, language: Option<&'static str>, beam_size: i32) -> Result<Self> {
         whisper_rs::install_logging_hooks();
         let context =
             WhisperContext::new_with_params(model, WhisperContextParameters::default())
@@ -105,7 +117,15 @@ impl Recognizer {
             .create_state()
             .context("Could not initialize Whisper")?;
         let threads = thread::available_parallelism().map_or(1, |count| count.get().min(4) as i32);
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        let strategy = if beam_size == 1 {
+            SamplingStrategy::Greedy { best_of: 1 }
+        } else {
+            SamplingStrategy::BeamSearch {
+                beam_size,
+                patience: -1.0,
+            }
+        };
+        let mut params = FullParams::new(strategy);
         params.set_n_threads(threads);
         params.set_language(language);
         params.set_no_context(true);
@@ -138,15 +158,16 @@ impl Recognizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::FRAME_SAMPLES;
 
     #[test]
     fn segmentation_keeps_pre_roll_and_flushes_after_a_pause() {
-        let mut segmenter = Segmenter::new();
+        let mut segmenter = Segmenter::new(4);
         let frame = [1; FRAME_SAMPLES];
         for _ in 0..PRE_ROLL_FRAMES * 2 {
             assert!(segmenter.push_frame(frame, false).is_none());
         }
-        for _ in 0..START_VOICE_FRAMES {
+        for _ in 0..MIN_VOICED_FRAMES {
             assert!(segmenter.push_frame(frame, true).is_none());
         }
         for _ in 1..END_SILENCE_FRAMES {
@@ -155,21 +176,49 @@ mod tests {
         let segment = segmenter.push_frame(frame, false).unwrap();
         assert_eq!(
             segment.len(),
-            (PRE_ROLL_FRAMES + END_SILENCE_FRAMES) * FRAME_SAMPLES
+            (PRE_ROLL_FRAMES + MIN_VOICED_FRAMES - START_VOICE_FRAMES + END_SILENCE_FRAMES)
+                * FRAME_SAMPLES
         );
         assert!(segmenter.finish().is_none());
     }
 
     #[test]
     fn segmentation_flushes_pending_speech_on_shutdown() {
-        let mut segmenter = Segmenter::new();
-        for _ in 0..START_VOICE_FRAMES {
+        let mut segmenter = Segmenter::new(4);
+        for _ in 0..MIN_VOICED_FRAMES {
             segmenter.push_frame([1; FRAME_SAMPLES], true);
         }
         assert_eq!(
             segmenter.finish().unwrap().len(),
-            START_VOICE_FRAMES * FRAME_SAMPLES
+            MIN_VOICED_FRAMES * FRAME_SAMPLES
         );
         assert!(segmenter.finish().is_none());
+    }
+
+    #[test]
+    fn segmentation_discards_short_noise_at_a_pause_and_at_shutdown() {
+        let mut segmenter = Segmenter::new(4);
+        for _ in 0..MIN_VOICED_FRAMES - 1 {
+            assert!(segmenter.push_frame([1; FRAME_SAMPLES], true).is_none());
+        }
+        for _ in 0..END_SILENCE_FRAMES {
+            assert!(segmenter.push_frame([0; FRAME_SAMPLES], false).is_none());
+        }
+        for _ in 0..START_VOICE_FRAMES {
+            assert!(segmenter.push_frame([1; FRAME_SAMPLES], true).is_none());
+        }
+        assert!(segmenter.finish().is_none());
+    }
+
+    #[test]
+    fn segmentation_splits_continuous_speech_at_the_configured_limit() {
+        let mut segmenter = Segmenter::new(2);
+        let frame = [1; FRAME_SAMPLES];
+        let frames_in_segment = 2 * SAMPLE_RATE as usize / FRAME_SAMPLES;
+        for _ in 1..frames_in_segment {
+            assert!(segmenter.push_frame(frame, true).is_none());
+        }
+        let segment = segmenter.push_frame(frame, true).unwrap();
+        assert_eq!(segment.len(), 2 * SAMPLE_RATE as usize);
     }
 }
